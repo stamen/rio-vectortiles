@@ -1,6 +1,4 @@
 """rio_vectortiles"""
-import numpy as np
-
 import mercantile
 import rasterio
 
@@ -14,9 +12,16 @@ from rasterio.features import shapes
 from rasterio.transform import from_bounds
 
 
-def read_transform_tile(tile, src_path=None, output_kwargs=None, extent_func=None, interval=1, layer_name="raster"):
+def read_transform_tile(
+    tile,
+    src_path=None,
+    output_kwargs=None,
+    extent_func=None,
+    interval=1,
+    layer_name="raster",
+):
     """Warp to dimensions and vectorize
-    
+
     Parameters
     ----------
     tile: mercantile.Tile
@@ -31,6 +36,8 @@ def read_transform_tile(tile, src_path=None, output_kwargs=None, extent_func=Non
         interval to vectorize on
     layer_name: str
         name of the created raster layer
+    interval: float
+        interval to vectorize on
 
     Returns
     -------
@@ -42,8 +49,11 @@ def read_transform_tile(tile, src_path=None, output_kwargs=None, extent_func=Non
     xy_bounds = mercantile.xy_bounds(*tile)
     extent = extent_func(tile.z)
     dst_transform = from_bounds(*xy_bounds, extent, extent)
-    
-    dst_kwargs = {**output_kwargs, **{"transform": dst_transform, "width": extent, "height": extent}}
+
+    dst_kwargs = {
+        **output_kwargs,
+        **{"transform": dst_transform, "width": extent, "height": extent},
+    }
 
     with rasterio.open(src_path) as src:
         src_band = rasterio.band(src, bidx=1)
@@ -63,11 +73,11 @@ def read_transform_tile(tile, src_path=None, output_kwargs=None, extent_func=Non
                         for x, y in ring:
                             feature.set_point(x * 8, y * 8)
                         feature.close_ring()
-                    feature.add_property(b'v', f"{v}".encode())
+                    feature.add_property(b"v", f"{v}".encode())
                     feature.commit()
 
     with BytesIO() as dst:
-        with gzip.open(dst, mode='wb') as gz:
+        with gzip.open(dst, mode="wb") as gz:
             gz.write(vtile.serialize())
         dst.seek(0)
         return dst.read(), tile

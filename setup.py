@@ -21,8 +21,8 @@ setup(
     extras_require={
         "test": ["pytest"],
     },
-   entry_points="""
+    entry_points="""
       [rasterio.rio_plugins]
       vectortiles=rio_vectortiles.scripts.cli:vectortiles
-      """
+      """,
 )

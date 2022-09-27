@@ -1,6 +1,8 @@
 # rio-vectortiles
 
-Rasterio plugin to vectorize and tiler raster data
+Rasterio plugin to vectorize and tiler raster data. This avoids some of the pitfalls and bottlenecks of vectorizing raster data by warping data to the vector tile grid and directly vectorizing each tile.
+
+It also offers flexible control as to internal tile extent (detail), vectorizing interval, and zoom range adjustment.
 
 ## Usage
 ```

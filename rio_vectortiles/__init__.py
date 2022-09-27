@@ -5,11 +5,23 @@ import rasterio
 from vtzero.tile import Tile, Layer, Polygon
 import gzip
 from io import BytesIO
-
+from affine import Affine
+import numpy as np
 from rasterio.warp import reproject
 from rasterio.io import MemoryFile
 from rasterio.features import shapes
 from rasterio.transform import from_bounds
+from rasterio.enums import Resampling
+import warnings
+
+warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
+
+
+def decompress_tile(tile_data):
+    """Util to decompress data to bytes"""
+    with BytesIO(tile_data) as src:
+        with gzip.open(src, "rb") as gz:
+            return gz.read()
 
 
 def read_transform_tile(
@@ -19,6 +31,7 @@ def read_transform_tile(
     extent_func=None,
     interval=1,
     layer_name="raster",
+    filters=[],
 ):
     """Warp to dimensions and vectorize
 
@@ -58,22 +71,32 @@ def read_transform_tile(
     with rasterio.open(src_path) as src:
         src_band = rasterio.band(src, bidx=1)
         vtile = Tile()
+
         layer = Layer(vtile, layer_name.encode(), extent=extent)
 
         with MemoryFile() as mem:
             with mem.open(**dst_kwargs) as dst:
                 dst_band = rasterio.band(dst, bidx=1)
+                reproject(src_band, dst_band, resampling=Resampling.mode)
+                dst.transform = Affine.identity()
+                if interval is None and not len(filters):
+                    vectorizer = shapes(dst_band)
+                else:
+                    data = dst.read(1)
+                    for f in filters:
+                        data = f(data)
+                    data = (data // interval * interval).astype(np.int32)
+                    vectorizer = shapes(data)
 
-                reproject(src_band, dst_band)
-
-                for s, v in shapes(dst_band):
+                for s, v in vectorizer:
                     feature = Polygon(layer)
                     for ring in s["coordinates"]:
+
                         feature.add_ring(len(ring))
                         for x, y in ring:
-                            feature.set_point(x * 8, y * 8)
+                            feature.set_point(x, y)
                         feature.close_ring()
-                    feature.add_property(b"v", f"{v}".encode())
+                    feature.add_property(b"v", f"{int(v)}".encode())
                     feature.commit()
 
     with BytesIO() as dst:

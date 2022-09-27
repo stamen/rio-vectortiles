@@ -23,6 +23,6 @@ setup(
     },
     entry_points="""
       [rasterio.rio_plugins]
-      vectortiles=rio_vectortiles.scripts.cli:vectortiles
+      vectortiles=rio_vectortiles.scripts.cli:cli
       """,
 )

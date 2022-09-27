@@ -8,7 +8,13 @@ import rasterio
 from rasterio.warp import transform_bounds
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
-from rio_vectortiles import read_transform_tile
+from rio_vectortiles import read_transform_tile, decompress_tile
+
+
+@click.group("vectortiles")
+@click.pass_context
+def cli(ctx):
+    pass
 
 
 def get_maxzoom(w, s, e, n, rows, cols, extent):
@@ -24,7 +30,47 @@ def _extent_func(z, maxz=None, min_extent=None, max_extent=None):
     return max([int(max_extent / 2 ** (maxz - z)), min_extent])
 
 
-@click.command(short_help="Export a dataset to MBTiles.")
+@cli.command("dump", short_help="Dump out tiles from an mbtiles")
+@click.argument("mbtiles", type=click.Path(resolve_path=True))
+@click.argument("output-directory", type=click.Path(resolve_path=True))
+def dump_tiles(mbtiles, output_directory):
+    """Dump decompressed tiles to disk"""
+    sqlite3.connect(":memory:").close()
+    reader = sqlite3.connect(mbtiles)
+    cur = reader.cursor()
+    for x, y, z, b in cur.execute(
+        "SELECT tile_column, tile_row, zoom_level, tile_data from tiles"
+    ):
+        tiley = int(2**z) - y - 1
+        with open(f"{output_directory}/{z}-{x}-{tiley}.mvt", "wb") as dst:
+            dst.write(decompress_tile(b))
+
+
+@cli.command("clump", short_help="Clump and index tiles from an mbtiles")
+@click.argument("mbtiles", type=click.Path(resolve_path=True))
+@click.argument("output-clump", type=click.Path(resolve_path=True))
+@click.argument("output-index", type=click.Path(resolve_path=True))
+def clump_tiles(mbtiles, output_clump, output_index):
+    """Clump decompressed tiles + index"""
+    sqlite3.connect(":memory:").close()
+    reader = sqlite3.connect(mbtiles)
+    cur = reader.cursor()
+    tile_map = {}
+    c = 0
+    with open(output_clump, "wb") as dst:
+        for x, y, z, b in cur.execute(
+            "SELECT tile_column, tile_row, zoom_level, tile_data from tiles"
+        ):
+            s = len(b)
+            dst.write(b)
+            tiley = int(2**z) - y - 1
+            tile_map[f"{z}/{x}/{tiley}"] = [c, c + s]
+            c += s
+    with open(output_index, "w") as dst:
+        json.dump(tile_map, dst)
+
+
+@cli.command("tile", short_help="Export a dataset to MBTiles.")
 @click.argument("input_raster", type=click.Path(resolve_path=True))
 @click.argument("output_mbtiles", type=click.Path(resolve_path=True))
 @click.option(
@@ -45,9 +91,8 @@ def _extent_func(z, maxz=None, min_extent=None, max_extent=None):
 @click.option(
     "--interval", type=float, default=None, help="Data interval to vectorize on"
 )
-@click.pass_context
 def vectortiles(
-    ctx, input_raster, output_mbtiles, min_extent, max_extent, interval, zoom_adjust
+    input_raster, output_mbtiles, min_extent, max_extent, interval, zoom_adjust
 ):
     """Raster-optimized vector tiler"""
     with rasterio.open(input_raster) as src:
@@ -55,8 +100,9 @@ def vectortiles(
         maxzoom = get_maxzoom(*wm_bounds, *src.shape, max_extent) + zoom_adjust
 
         wgs_bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
-        tiles = list(mercantile.tiles(*wgs_bounds, range(maxzoom + 1)))
 
+        tiles = list(mercantile.tiles(*wgs_bounds, range(maxzoom + 1)))
+        click.echo(f"Generating {len(tiles):,} tiles from zooms 0-{maxzoom}", err=True)
         dst_profile = dict(
             driver="GTiff", count=1, dtype=src.meta["dtype"], crs="EPSG:3857"
         )
@@ -126,7 +172,7 @@ def vectortiles(
             extent_func=extent_func,
             interval=interval,
         )
-
+        tile_sizes = [[] for _ in range(maxzoom + 1)]
         with ThreadPoolExecutor() as pool:
             for b, (x, y, z) in pool.map(tiling_func, tiles):
                 tiley = int(2**z) - y - 1
@@ -136,4 +182,16 @@ def vectortiles(
                     "VALUES (?, ?, ?, ?);",
                     (z, x, tiley, sqlite3.Binary(b)),
                 )
+                tile_sizes[z].append(len(b))
+
         writer.commit()
+
+        for z, t in enumerate(tile_sizes):
+            click.echo(
+                {
+                    "zoom": z,
+                    "min": min(t) / 1000,
+                    "mean": np.mean(t) / 1000,
+                    "max": max(t) / 1000,
+                }
+            )

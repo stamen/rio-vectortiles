@@ -1,7 +1,7 @@
 """rio_vectortiles"""
 import mercantile
+from shapely import geometry
 import rasterio
-
 from vtzero.tile import Tile, Layer, Polygon
 import gzip
 from io import BytesIO
@@ -9,10 +9,11 @@ from affine import Affine
 import numpy as np
 from rasterio.warp import reproject
 from rasterio.io import MemoryFile
-from rasterio.features import shapes
+from rasterio.features import shapes, sieve
 from rasterio.transform import from_bounds
 from rasterio.enums import Resampling
 import warnings
+from itertools import groupby
 
 warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
 
@@ -73,29 +74,46 @@ def read_transform_tile(
         vtile = Tile()
 
         layer = Layer(vtile, layer_name.encode(), extent=extent)
-
+        sieve_value = 2
         with MemoryFile() as mem:
             with mem.open(**dst_kwargs) as dst:
                 dst_band = rasterio.band(dst, bidx=1)
                 reproject(src_band, dst_band, resampling=Resampling.mode)
                 dst.transform = Affine.identity()
-                if interval is None and not len(filters):
-                    vectorizer = shapes(dst_band)
-                else:
+                if interval is None and sieve_value:
+                    data = sieve(dst_band, sieve_value)
+                    vectorizer = shapes(data)
+                elif interval is not None:
                     data = dst.read(1)
                     for f in filters:
                         data = f(data)
                     data = (data // interval * interval).astype(np.int32)
                     vectorizer = shapes(data)
+                else:
+                    vectorizer = shapes(dst_band)
 
-                for s, v in vectorizer:
+                grouped_vectors = groupby(
+                    sorted(vectorizer, key=lambda x: x[1]), key=lambda x: x[1]
+                )
+
+                for v, geoms in grouped_vectors:
                     feature = Polygon(layer)
-                    for ring in s["coordinates"]:
+                    geoms = geometry.MultiPolygon(
+                        [geometry.shape(g) for g, _ in geoms]
+                    ).buffer(0)
+                    if geoms.geom_type == "Polygon":
+                        iter_polys = [geoms]
+                    else:
+                        iter_polys = geoms.geoms
+                    for geom in iter_polys:
+                        feature.add_ring(len(geom.exterior.coords))
+                        for coord in geom.exterior.coords:
+                            feature.set_point(*coord)
+                        for part in geom.interiors:
+                            feature.add_ring(len(part.coords))
+                            for coord in part.coords:
+                                feature.set_point(*coord)
 
-                        feature.add_ring(len(ring))
-                        for x, y in ring:
-                            feature.set_point(x, y)
-                        feature.close_ring()
                     feature.add_property(b"v", f"{int(v)}".encode())
                     feature.commit()
 

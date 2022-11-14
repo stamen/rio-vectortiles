@@ -98,6 +98,7 @@ def read_transform_tile(
 
                 for v, geoms in grouped_vectors:
                     feature = Polygon(layer)
+                    feature.set_id(v)
                     geoms = geometry.MultiPolygon(
                         [geometry.shape(g) for g, _ in geoms]
                     ).buffer(0)
@@ -113,8 +114,7 @@ def read_transform_tile(
                             feature.add_ring(len(part.coords))
                             for coord in part.coords:
                                 feature.set_point(*coord)
-
-                    feature.add_property(b"v", f"{int(v)}".encode())
+                    # feature.add_property(b"v", f"{int(v)}".encode())
                     feature.commit()
 
     with BytesIO() as dst:

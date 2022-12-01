@@ -7,8 +7,18 @@ import sqlite3
 import rasterio
 from rasterio.warp import transform_bounds
 from functools import partial
+
 from concurrent.futures import ThreadPoolExecutor
-from rio_vectortiles import read_transform_tile, decompress_tile
+from rio_vectortiles import read_transform_tile
+from pathlib import Path
+
+
+def make_tile_iterable(w, s, e, n, zoom, buffer=0):
+    UL = mercantile.tile(w, n, zoom)
+    LR = mercantile.tile(e, s, zoom)
+    for x in range(max(UL.x - buffer, 0), min(LR.x + buffer, 2**zoom)):
+        for y in range(max(UL.y - buffer, 0), min(LR.y + buffer, 2**zoom)):
+            yield mercantile.Tile(x, y, zoom)
 
 
 @click.group("vectortiles")
@@ -42,8 +52,14 @@ def dump_tiles(mbtiles, output_directory):
         "SELECT tile_column, tile_row, zoom_level, tile_data from tiles"
     ):
         tiley = int(2**z) - y - 1
-        with open(f"{output_directory}/{z}-{x}-{tiley}.mvt", "wb") as dst:
-            dst.write(decompress_tile(b))
+        dst_path = Path(f"{output_directory}/{z}/{x}/{tiley}.png")
+        for i, p in enumerate(dst_path.parts[1:-1], 1):
+            dst_folder = Path(*dst_path.parts[: i + 1])
+            if not os.path.isdir(dst_folder):
+                os.mkdir(dst_folder)
+
+        with open(dst_path, "wb") as dst:
+            dst.write(b)
 
 
 @cli.command("clump", short_help="Clump and index tiles from an mbtiles")
@@ -100,8 +116,11 @@ def vectortiles(
         maxzoom = get_maxzoom(*wm_bounds, *src.shape, max_extent) + zoom_adjust
 
         wgs_bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
-
-        tiles = list(mercantile.tiles(*wgs_bounds, range(maxzoom + 1)))
+        zoom_groups = (
+            make_tile_iterable(*wgs_bounds, z, 1) for z in range(maxzoom + 1)
+        )
+        tiles = [t for z in zoom_groups for t in z]
+        # tiles = list(mercantile.tiles(*wgs_bounds, range(maxzoom + 1)))
         click.echo(f"Generating {len(tiles):,} tiles from zooms 0-{maxzoom}", err=True)
         dst_profile = dict(
             driver="GTiff", count=1, dtype=src.meta["dtype"], crs="EPSG:3857"

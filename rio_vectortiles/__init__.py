@@ -2,17 +2,16 @@
 import mercantile
 import rasterio
 
-from vtzero.tile import Tile, Layer, Polygon
 import gzip
 from io import BytesIO
-from affine import Affine
+
 import numpy as np
 from rasterio.warp import reproject
 from rasterio.io import MemoryFile
-from rasterio.features import shapes
 from rasterio.transform import from_bounds
 from rasterio.enums import Resampling
 import warnings
+from PIL import Image
 
 warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
 
@@ -70,37 +69,25 @@ def read_transform_tile(
 
     with rasterio.open(src_path) as src:
         src_band = rasterio.band(src, bidx=1)
-        vtile = Tile()
-
-        layer = Layer(vtile, layer_name.encode(), extent=extent)
 
         with MemoryFile() as mem:
             with mem.open(**dst_kwargs) as dst:
                 dst_band = rasterio.band(dst, bidx=1)
                 reproject(src_band, dst_band, resampling=Resampling.mode)
-                dst.transform = Affine.identity()
-                if interval is None and not len(filters):
-                    vectorizer = shapes(dst_band)
-                else:
-                    data = dst.read(1)
-                    for f in filters:
-                        data = f(data)
-                    data = (data // interval * interval).astype(np.int32)
-                    vectorizer = shapes(data)
+                data = dst.read(1)
+                A = data / 256
+                B = data // 256
+                C = B / 256
+                D = B // 256
 
-                for s, v in vectorizer:
-                    feature = Polygon(layer)
-                    for ring in s["coordinates"]:
+                blue = ((A - B) * 256).astype(np.uint8)
+                green = ((C - D) * 256).astype(np.uint8)
+                red = (((D / 256) - (D // 256)) * 256).astype(np.uint8)
 
-                        feature.add_ring(len(ring))
-                        for x, y in ring:
-                            feature.set_point(x, y)
-                        feature.close_ring()
-                    feature.add_property(b"v", f"{int(v)}".encode())
-                    feature.commit()
+                img = Image.fromarray(np.dstack([red, green, blue]))
 
     with BytesIO() as dst:
-        with gzip.open(dst, mode="wb") as gz:
-            gz.write(vtile.serialize())
+        img.save(dst, format="png")
+
         dst.seek(0)
         return dst.read(), tile

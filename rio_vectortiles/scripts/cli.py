@@ -7,7 +7,8 @@ import sqlite3
 import rasterio
 from rasterio.warp import transform_bounds
 from functools import partial
-from concurrent.futures import ThreadPoolExecutor
+from random import shuffle
+from multiprocessing import Pool
 from rio_vectortiles import read_transform_tile, decompress_tile
 
 
@@ -88,11 +89,24 @@ def clump_tiles(mbtiles, output_clump, output_index):
     type=int,
     help="Number of zoom levels to extend from pixel-derived maxzoom",
 )
+@click.option("--minzoom", default=0)
 @click.option(
     "--interval", type=float, default=None, help="Data interval to vectorize on"
 )
+@click.option(
+    "--bbox", type=str, default=None, help="Only generate tiles within this bbox"
+)
+@click.option("--dryrun", is_flag=True)
 def vectortiles(
-    input_raster, output_mbtiles, min_extent, max_extent, interval, zoom_adjust
+    input_raster,
+    output_mbtiles,
+    min_extent,
+    max_extent,
+    interval,
+    zoom_adjust,
+    bbox,
+    minzoom,
+    dryrun,
 ):
     """Raster-optimized vector tiler"""
     with rasterio.open(input_raster) as src:
@@ -100,98 +114,113 @@ def vectortiles(
         maxzoom = get_maxzoom(*wm_bounds, *src.shape, max_extent) + zoom_adjust
 
         wgs_bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+        if bbox is not None:
+            wgs_bounds = json.loads(bbox)
 
-        tiles = list(mercantile.tiles(*wgs_bounds, range(maxzoom + 1)))
-        click.echo(f"Generating {len(tiles):,} tiles from zooms 0-{maxzoom}", err=True)
-        dst_profile = dict(
-            driver="GTiff", count=1, dtype=src.meta["dtype"], crs="EPSG:3857"
-        )
-
-        if os.path.exists(output_mbtiles):
-            os.unlink(output_mbtiles)
-
-        sqlite3.connect(":memory:").close()
-        writer = sqlite3.connect(output_mbtiles, isolation_level=None)
-        # writer.execute('pragma journal_mode=wal;')
-
-        cur = writer.cursor()
-
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS tiles "
-            "(zoom_level integer, tile_column integer, "
-            "tile_row integer, tile_data blob);"
-        )
-        cur.execute(
-            "CREATE UNIQUE INDEX idx_zcr ON tiles (zoom_level, tile_column, tile_row);"
-        )
-        cur.execute("CREATE TABLE IF NOT EXISTS metadata (name text, value text);")
-
-        cur.execute(
-            "INSERT INTO metadata (name, value) VALUES (?, ?);",
-            ("name", "rio-vectortiles"),
-        )
-        cur.execute(
-            "INSERT INTO metadata (name, value) VALUES (?, ?);",
-            ("type", "pbf"),
-        )
-        cur.execute(
-            "INSERT INTO metadata (name, value) VALUES (?, ?);",
-            ("version", "1.1"),
-        )
-        cur.execute(
-            "INSERT INTO metadata (name, value) VALUES (?, ?);",
-            ("description", f"{input_raster}"),
-        )
-
-        cur.execute(
-            "INSERT INTO metadata (name, value) VALUES (?, ?);",
-            (
-                "json",
-                json.dumps(
-                    {
-                        "vector_layers": [
-                            {
-                                "id": "raster",
-                                "minzoom": 0,
-                                "maxzoom": maxzoom,
-                                "fields": {"v": "String"},
-                            }
-                        ]
-                    }
-                ),
-            ),
-        )
+        tiles = list(mercantile.tiles(*wgs_bounds, range(minzoom, maxzoom + 1)))
 
         extent_func = partial(
             _extent_func, maxz=maxzoom, min_extent=min_extent, max_extent=max_extent
         )
-        tiling_func = partial(
-            read_transform_tile,
-            src_path=input_raster,
-            output_kwargs=dst_profile,
-            extent_func=extent_func,
-            interval=interval,
+
+        extents = [extent_func(z) for z in range(minzoom, maxzoom + 1)]
+
+        click.echo(
+            f"Generating {len(tiles):,} tiles from zooms {minzoom}-{maxzoom} within {wgs_bounds}",
+            err=True,
         )
-        tile_sizes = [[] for _ in range(maxzoom + 1)]
-        with ThreadPoolExecutor() as pool:
-            for b, (x, y, z) in pool.map(tiling_func, tiles):
-                tiley = int(2**z) - y - 1
-                cur.execute(
-                    "INSERT OR REPLACE INTO tiles "
-                    "(zoom_level, tile_column, tile_row, tile_data) "
-                    "VALUES (?, ?, ?, ?);",
-                    (z, x, tiley, sqlite3.Binary(b)),
-                )
-                tile_sizes[z].append(len(b))
-
-        writer.commit()
-
-        for z, t in enumerate(tile_sizes):
-            click.echo(
-                {
-                    "zoom": z,
-                    "min": min(t) / 1000,
-                    "mean": np.mean(t) / 1000,
-                    "max": max(t) / 1000,
-                }
+        click.echo(f"Using internal extents of {extents}", err=True)
+        if not dryrun:
+            dst_profile = dict(
+                driver="GTiff", count=1, dtype=src.meta["dtype"], crs="EPSG:3857"
             )
+
+            if os.path.exists(output_mbtiles):
+                os.unlink(output_mbtiles)
+
+            sqlite3.connect(":memory:").close()
+            writer = sqlite3.connect(output_mbtiles, isolation_level=None)
+            # writer.execute('pragma journal_mode=wal;')
+
+            cur = writer.cursor()
+
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS tiles "
+                "(zoom_level integer, tile_column integer, "
+                "tile_row integer, tile_data blob);"
+            )
+            cur.execute(
+                "CREATE UNIQUE INDEX idx_zcr ON tiles (zoom_level, tile_column, tile_row);"
+            )
+            cur.execute("CREATE TABLE IF NOT EXISTS metadata (name text, value text);")
+
+            cur.execute(
+                "INSERT INTO metadata (name, value) VALUES (?, ?);",
+                ("name", "rio-vectortiles"),
+            )
+            cur.execute(
+                "INSERT INTO metadata (name, value) VALUES (?, ?);",
+                ("type", "pbf"),
+            )
+            cur.execute(
+                "INSERT INTO metadata (name, value) VALUES (?, ?);",
+                ("version", "1.1"),
+            )
+            cur.execute(
+                "INSERT INTO metadata (name, value) VALUES (?, ?);",
+                ("description", f"{input_raster}"),
+            )
+
+            cur.execute(
+                "INSERT INTO metadata (name, value) VALUES (?, ?);",
+                (
+                    "json",
+                    json.dumps(
+                        {
+                            "vector_layers": [
+                                {
+                                    "id": "raster",
+                                    "minzoom": 0,
+                                    "maxzoom": maxzoom,
+                                    "fields": {},
+                                }
+                            ]
+                        }
+                    ),
+                ),
+            )
+
+            tiling_func = partial(
+                read_transform_tile,
+                src_path=input_raster,
+                output_kwargs=dst_profile,
+                extent_func=extent_func,
+                interval=interval,
+            )
+            tile_sizes = {z: [] for z in range(minzoom, maxzoom + 1)}
+            # shuffle the tiles to make a better guess as to tiling time
+            shuffle(tiles)
+            with click.progressbar(length=len(tiles), label="Tiling") as bar:
+                with Pool() as pool:
+                    for b, (x, y, z) in pool.imap_unordered(tiling_func, tiles):
+                        tiley = int(2**z) - y - 1
+                        cur.execute(
+                            "INSERT OR REPLACE INTO tiles "
+                            "(zoom_level, tile_column, tile_row, tile_data) "
+                            "VALUES (?, ?, ?, ?);",
+                            (z, x, tiley, sqlite3.Binary(b)),
+                        )
+                        tile_sizes[z].append(len(b))
+                        bar.update(1)
+
+            writer.commit()
+
+            for z, t in tile_sizes.items():
+                click.echo(
+                    {
+                        "zoom": z,
+                        "min": min(t) / 1000,
+                        "mean": np.mean(t) / 1000,
+                        "max": max(t) / 1000,
+                    }
+                )

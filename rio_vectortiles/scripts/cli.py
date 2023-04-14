@@ -140,7 +140,6 @@ def vectortiles(
 
             sqlite3.connect(":memory:").close()
             writer = sqlite3.connect(output_mbtiles, isolation_level=None)
-            # writer.execute('pragma journal_mode=wal;')
 
             cur = writer.cursor()
 
